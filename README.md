@@ -63,10 +63,13 @@ User will be given a link like 'Link to Ami Id lookup table: https://www.paloalt
  
  
  
- 
- 
+
 # How to Deploy?  
 Create the necessary prerequisites to deploy the template.  
 Create S3 buckets for both active and passive FWs with necessary folders ( eg: config, license, plugins)  
 Create a S3 bucket for lambda and make sure to have the panw-aws-ha.zip in that S3 bucket for the parameter LambdaS3Bucket.  
 In the AWS Portal, under Cloud formation pane, upload  the deployment template. Fill the required  input parameters and deploy.  
+
+# Support Policy: 
+**This Template is Community-Supported aka NOT TAC SUPPORTED**
+This CFT is released under an as-is, best effort, support policy. These scripts should be seen as community supported and Palo Alto Networks will contribute our expertise as and when possible. We do not provide technical support or help in using or troubleshooting the components of the project through our normal support options such as Palo Alto Networks support teams, or ASC (Authorized Support Centers) partners and backline support options. The underlying product used (the VM-Series firewall) by the scripts or templates are still supported, but the support is only for the product functionality and not for help in deploying or using the template or script itself. Unless explicitly tagged, all projects or work posted in our GitHub repository (at https://github.com/PaloAltoNetworks) or sites other than our official Downloads page on https://support.paloaltonetworks.com are provided under the best effort policy.
