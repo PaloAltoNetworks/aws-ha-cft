@@ -1,0 +1,1452 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "AWS CloudFormation Template to deploy a Active-Passive HA solution with two PaloAlto Networks VM-Series Firewall.",
+    "Parameters": {
+        "VPCName" : {
+            "Description" : "Enter a VPC name. ",
+            "Default": "panwVPC",
+            "Type" : "String",
+            "MinLength": "6",
+            "MaxLength": "24",
+        },
+        "VPCCIDR": {
+            "Type": "String",
+            "Default": "10.4.0.0/16",
+            "AllowedPattern" : "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+            "Description": "Provide a network CIDR for the VPC"
+        },
+        "MgmtSubnetPrefix": {
+            "Type": "String",   
+            "Default": "10.4.1.0/24",
+            "Description": "Enter a subnet prefix for the firewall's management interface"
+        },
+        "HA2SubnetPrefix": {
+            "Type": "String",
+            "Default": "10.4.2.0/24",
+            "Description": "Enter a subnet prefix for the firewall's HA2 interface"
+        },
+        "PublicSubnetPrefix": {
+            "Type": "String",
+            "Default": "10.4.3.0/24",
+            "Description": "Enter a subnet prefix for the firewall's first dataplane interface"
+        },
+        "PrivateSubnetPrefix": {
+            "Type": "String",
+            "Default": "10.4.4.0/24",
+            "Description": "Enter a subnet prefix for the firewall's second dataplane interface"
+        },
+        "LambdaSubnetPrefix": {
+            "Type": "String",
+            "Default": "10.4.5.0/24",
+            "Description": "Enter a subnet prefix for the Lambda internet access."
+        },
+        "NeedDataPlaneIntfEIPAssociation": {
+            "Type": "String",
+            "Default": "no",
+            "Description": "Enter yes/no to associate/not-associate EIP to dataplane interface",
+            "AllowedValues": [
+                "yes",
+                "no"
+            ]
+        },
+        "KeyName" : {
+            "Description" : "Amazon EC2 Key Pair",
+            "Type" : "AWS::EC2::KeyPair::KeyName"
+        },
+        "InstanceType": {
+            "Type": "String",
+            "Default": "m4.xlarge",
+            "AllowedValues": [
+                "t2.micro",
+                "t2.small",
+                "t2.medium",
+                "m1.large",
+                "m3.xlarge",
+                "c4.2xlarge",
+                "m4.xlarge"
+            ],
+            "Description": "must be a valid EC2 instance type."
+        },
+        "AvailabilityZone": {
+            "Description": "Enter the Availability Zone",
+            "Type": "AWS::EC2::AvailabilityZone::Name"
+        },
+        "BootstrapS3BucketActive": {
+            "Type" : "String",
+            "Description": "Enter the name of the Bootstrap S3 bucket for the VM-Series active firewall",
+            "Default": "none",
+            "MinLength" : "3",
+            "MaxLength" : "63"
+        },
+        "BootstrapS3BucketPassive": {
+            "Type" : "String",
+            "Description": "Enter the name of the Bootstrap S3 bucket for the VM-Series passive firewall",
+            "Default": "none",
+            "MinLength" : "3",
+            "MaxLength" : "63"
+        },
+        "CIDRForInstanceAccess": {
+            "Type": "String",
+            "Default": "0.0.0.0/0",
+            "Description": "Enter the network CIDR from which the VM-Series instances will be accessed"
+        },
+        "PanFwAmiId": {
+            "Type": "AWS::EC2::Image::Id",
+            "Description": "Link to Ami Id lookup table: https://www.paloaltonetworks.com/documentation/global/compatibility-matrix/vm-series-firewalls/aws-cft-amazon-machine-images-ami-list"
+        },
+        "KeyPANWFirewall": {
+            "Type" : "String",
+            "Description": "API Key associated to username/password of the VM-Series Firewall. By default it is pandemo/demopassword",
+            "Default": "LUFRPT1hZzlYblg3VzdraWRrditGNkJlNVNyUjZ6d0U9NU9yalI4MmRvVGdWOWw1N2x1bk0vcTBGWEJ1TStaYno5WE41azJEYVRmeDlEL3F6T0xQZnBlRGowWkY0N2JFeg==",
+            "AllowedPattern": "[\\S0-9a-zA-Z]+",
+            "ConstraintDescription" : "The PAN FW API key is required.",
+            "NoEcho" : "true"
+        },
+        "LambdaS3Bucket": {
+            "Type" : "String",
+            "Description": "VM-Series firewall Lambda/Scripts/CFT template S3 Bucket or your own in the same region",
+            "Default": "panw-aws-ha",
+            "MinLength" : "3",
+            "MaxLength" : "63"
+        }
+    },
+    "Metadata" : {
+        "AWS::CloudFormation::Interface" : {
+            "ParameterGroups" : [
+                {
+                    "Label": {"default": "VPC Configuration"},
+                    "Parameters": [ 
+                        "VPCName", 
+                        "VPCCIDR",
+                        "MgmtSubnetPrefix",
+                        "HA2SubnetPrefix",
+                        "PublicSubnetPrefix",
+                        "PrivateSubnetPrefix",
+                        "LambdaSubnetPrefix"
+                    ]
+                },
+                {
+                    "Label": {"default": "VM-Series Firewall Instance Configuration"},
+                    "Parameters": [
+                        "PanFwAmiId", 
+                        "InstanceType",
+                        "KeyName",
+                        "AvailabilityZone",
+                        "BootstrapS3BucketActive", 
+                        "BootstrapS3BucketPassive",
+                        "NeedDataPlaneIntfEIPAssociation",
+                        "CIDRForInstanceAccess",
+                        "KeyPANWFirewall",
+                        "LambdaS3Bucket"
+                    ]
+                }
+            ]
+        }
+    },
+    "Conditions" : {
+        "AssociateEIPToDataPlaneIntf" : {
+            "Fn::Equals" : [
+                {
+                    "Ref" : "NeedDataPlaneIntfEIPAssociation"
+                }, 
+                "yes"
+            ]
+        }
+    },
+    "Resources": {
+        "InstanceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "ec2.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "ApplicationPolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "ec2:DescribeInstances",
+                                        "ec2:DetachNetworkInterface",
+                                        "ec2:DescribeNetworkInterfaces",
+                                        "ec2:AttachNetworkInterface",
+                                        "ec2:AssociateAddress",
+                                        "ec2:AssignPrivateIpAddresses",
+                                        "ec2:UnassignPrivateIpAddresses",
+                                        "ec2:ReplaceRoute",
+                                        "ec2:DescribeRouteTables",
+                                        "iam:GetPolicyVersion",
+                                        "iam:GetPolicy",
+                                        "iam:ListAttachedRolePolicies",
+                                        "iam:ListRolePolicies",
+                                        "iam:GetRolePolicy"
+                                    ],
+                                    "Resource": "*"
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": "s3:ListBucket",
+                                    "Resource": { 
+                                        "Fn::Join": [ 
+                                            "", 
+                                            [ 
+                                                "arn:aws:s3:::", 
+                                                { 
+                                                    "Ref" : "BootstrapS3BucketActive"
+                                                } 
+                                            ] 
+                                        ] 
+                                    }
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": "s3:ListBucket",
+                                    "Resource": { 
+                                        "Fn::Join": [ 
+                                            "", 
+                                            [ 
+                                                "arn:aws:s3:::", 
+                                                { 
+                                                    "Ref" : "BootstrapS3BucketPassive"
+                                                } 
+                                            ] 
+                                        ] 
+                                    }
+                                },
+                                {  
+                                    "Effect": "Allow",
+                                    "Action": "s3:GetObject",
+                                    "Resource": { 
+                                        "Fn::Join": [ 
+                                            "", 
+                                            [ 
+                                                "arn:aws:s3:::", 
+                                                { 
+ 
+                                                    "Ref" : "BootstrapS3BucketActive"
+                                                }, 
+                                                "/*" 
+                                            ] 
+                                        ] 
+                                    }
+                                },
+                                {  
+                                    "Effect": "Allow",
+                                    "Action": "s3:GetObject",
+                                    "Resource": { 
+                                        "Fn::Join": [ 
+                                            "", 
+                                            [ 
+                                                "arn:aws:s3:::", 
+                                                { 
+                                                    "Ref" : "BootstrapS3BucketPassive"
+                                                }, 
+                                                "/*" 
+                                            ] 
+                                        ] 
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "InstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Path": "/",
+                "Roles": [
+                    {
+                        "Ref": "InstanceRole"
+                    }
+                ]
+            }
+        },
+        "VPC": {
+            "Type": "AWS::EC2::VPC",
+            "Properties": {
+                "EnableDnsSupport": "true",
+                "EnableDnsHostnames": "true",
+                "CidrBlock": {
+                    "Ref": "VPCCIDR"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-",
+                                    {
+                                        "Ref": "VPCName"
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "Subnet1": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "CidrBlock": {
+                    "Ref": "MgmtSubnetPrefix"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwMgmtSubnet"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "Subnet2": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "CidrBlock": {
+                    "Ref": "HA2SubnetPrefix"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwHA2Subnet"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "Subnet3": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "CidrBlock": {
+                    "Ref": "PublicSubnetPrefix"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwPublicSubnet"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "Subnet4": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "CidrBlock": {
+                    "Ref": "PrivateSubnetPrefix"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwPrivateSubnet"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "InternetGateway": {
+            "Type": "AWS::EC2::InternetGateway",
+            "Properties": {
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-Igw"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "AttachGateway": {
+            "Type": "AWS::EC2::VPCGatewayAttachment",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "InternetGatewayId": {
+                    "Ref": "InternetGateway"
+                }
+            }
+        },
+        "RouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-PublicRouteTable"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "RouteTable1": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-PrivateRouteTable"
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "Route1": {
+            "Type": "AWS::EC2::Route",
+            "DependsOn": "AttachGateway",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "RouteTable"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "GatewayId": {
+                    "Ref": "InternetGateway"
+                }
+            }
+        },
+        "Route2": {
+            "Type": "AWS::EC2::Route",
+            "DependsOn": "AttachGateway",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "RouteTable1"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "NetworkInterfaceId": {
+                    "Ref": "panwFW1eni3"
+                }
+            }
+        },
+        "SubnetRouteTableAssociation1": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {
+                    "Ref": "Subnet1"
+                },
+                "RouteTableId": {
+                    "Ref": "RouteTable"
+                }
+            }
+        },
+        "SubnetRouteTableAssociation2": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {
+                    "Ref": "Subnet3"
+                },
+                "RouteTableId": {
+                    "Ref": "RouteTable"
+                }
+            }
+        },
+        "SubnetRouteTableAssociation3": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {
+                    "Ref": "Subnet4"
+                },
+                "RouteTableId": {
+                    "Ref": "RouteTable1"
+                }
+            }
+        },
+        "PaloAltoFWSecGrp": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "GroupDescription": "Palo Alto Networks SecGrp",
+                "SecurityGroupIngress": [
+                    {
+                        "Description": "Allow remote access to Palo Alto Networks Firewall",
+                        "IpProtocol": "-1",
+                        "FromPort": "0",
+                        "ToPort": "65535",
+                        "CidrIp": {
+                            "Ref": "CIDRForInstanceAccess"
+                        }
+                    },
+                    {
+                        "Description": "Allow local VPC access to Palo Alto Networks Firewall",
+                        "IpProtocol": "-1",
+                        "FromPort": "0",
+                        "ToPort": "65535",
+                        "CidrIp": {
+                            "Ref": "VPCCIDR"
+                        }
+                    },
+                    {
+                        "Description": "Allow VPC access to Palo Alto Networks Firewall from pangp",
+                        "IpProtocol": "-1",
+                        "FromPort": "0",
+                        "ToPort": "65535",
+                        "CidrIp": "199.167.54.229/32"
+                    }
+                ]
+            }
+        },
+        "LambdaSecurityGroup" : {
+            "Type" : "AWS::EC2::SecurityGroup",
+            "Properties" : {
+                "GroupDescription" : "Security Group for within VPC",
+                "VpcId" : { "Ref" : "VPC" },
+                "Tags": [ { "Key": "Name", "Value": { "Fn::Join": [ "", [ { "Ref": "AWS::StackName" },  "LambdaSecurityGroup" ] ] } } ],
+                "SecurityGroupIngress" : [{
+                    "IpProtocol" : "-1",
+                    "FromPort" : "-1",
+                    "ToPort" : "-1",
+                    "CidrIp" : "0.0.0.0/0"
+                }],
+                "SecurityGroupEgress" : [{
+                    "IpProtocol" : "-1",
+                    "FromPort" : "-1",
+                    "ToPort" : "-1",
+                    "CidrIp" : "0.0.0.0/0"
+                }]
+            }
+        },
+        "LambdaSubnet1": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "CidrBlock": {"Ref":"LambdaSubnetPrefix"},
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwLambdaSubnet1"
+                                ]
+                            ]
+                        }
+                    }   
+                ]
+            }
+        },
+        "LambdaRouteTable1" : {
+            "Type" : "AWS::EC2::RouteTable",
+            "Properties" : {
+                "VpcId" : { "Ref" : "VPC" },
+                "Tags" : [
+                    { "Key" : "Application", "Value" : { "Ref" : "AWS::StackId" } },
+                    { "Key" : "Name", "Value": { "Fn::Join": [ "-", [ { "Ref": "AWS::StackName" },  "LambdaRouteTable1" ] ] }}
+                ]
+            }
+        },
+        "NATEIP" : {
+            "Type" : "AWS::EC2::EIP",
+            "Properties" : {
+                "Domain" : "VPC"
+            }
+        },
+        "NATGW" : {
+            "Type" : "AWS::EC2::NatGateway",
+            "Properties" : {
+                "AllocationId" : { "Fn::GetAtt" : ["NATEIP", "AllocationId"]},
+                "SubnetId" : { "Ref" : "Subnet1"}
+            },
+            "DependsOn" : ["NATEIP"]
+        },
+        "NATGWRoute1" : {
+            "Type" : "AWS::EC2::Route",
+            "Properties" : {
+                "RouteTableId" : { "Ref" : "LambdaRouteTable1" },
+                "DestinationCidrBlock" : "0.0.0.0/0",
+                "NatGatewayId" : { "Ref" : "NATGW" }
+            },
+            "DependsOn": [ "NATGW" ]
+        },
+        "LambdaSubnetRouteTableAssociation1" : {
+            "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties" : {
+                "SubnetId" : { "Ref" : "LambdaSubnet1" },
+                "RouteTableId" : { "Ref" : "LambdaRouteTable1" }
+            },
+            "DependsOn": [ "LambdaRouteTable1", "LambdaSubnet1" ]
+        },
+        "panwFW1": {
+            "Type": "AWS::EC2::Instance",
+            "Properties": {
+                "ImageId": {
+                    "Ref": "PanFwAmiId"
+                },
+                "InstanceType": {
+                    "Ref": "InstanceType"
+                },
+                "IamInstanceProfile": {
+                    "Ref": "InstanceProfile"
+                },
+                "KeyName": {
+                    "Ref": "KeyName"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "NetworkInterfaces": [
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW1eni0"
+                        },
+                        "DeviceIndex": "0"
+                    },
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW1eni1"
+                        },
+                        "DeviceIndex": "1"
+                    },
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW1eni2"
+                        },
+                        "DeviceIndex": "2"
+                    },
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW1eni3"
+                        },
+                        "DeviceIndex": "3"
+                    }
+                ],
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-vmseries-active"
+                                ]
+                            ]
+                        }
+                    }
+                ],
+                "UserData":  { 
+                    "Fn::Base64" : { 
+                        "Fn::Join" : [
+                            "", 
+                            [
+                                "vmseries-bootstrap-aws-s3bucket=",  
+                                { 
+                                    "Ref" : "BootstrapS3BucketActive"
+                                }
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "panwFW2": {
+            "Type": "AWS::EC2::Instance",
+            "Properties": {
+                "ImageId": {
+                    "Ref": "PanFwAmiId"
+                },
+                "InstanceType": {
+                    "Ref": "InstanceType"
+                },
+                "IamInstanceProfile": {
+                    "Ref": "InstanceProfile"
+                },
+                "KeyName": {
+                    "Ref": "KeyName"
+                },
+                "AvailabilityZone": {
+                    "Ref": "AvailabilityZone"
+                },
+                "NetworkInterfaces": [
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW2eni0"
+                        },
+                        "DeviceIndex": "0"
+                    },
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW2eni1"
+                        },
+                        "DeviceIndex": "1"
+                    },
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW2eni2"
+                        },
+                        "DeviceIndex": "2"
+                    },
+                    {
+                        "NetworkInterfaceId": {
+                            "Ref": "panwFW2eni3"
+                        },
+                        "DeviceIndex": "3"
+                    }
+                ],
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-vmseries-passive"
+                                ]
+                            ]
+                        }
+                    }
+                ],
+                "UserData":  { 
+                    "Fn::Base64" : { 
+                        "Fn::Join" : [
+                            "", 
+                            [
+                                "vmseries-bootstrap-aws-s3bucket=",  
+                                { 
+                                    "Ref" : "BootstrapS3BucketPassive"
+                                }
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "panwFW1eni0": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 1 management interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW1eni0"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth0"
+                    }
+                ]
+            }
+        },
+        "panwFW1eni1": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 1 HA2 interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet2"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW1eni1"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth1"
+                    }
+                ]
+            }
+        },
+        "panwFW1eni2": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 1 public (untrust) interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet3"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW1eni2"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth2"
+                    }
+                ],
+                "SecondaryPrivateIpAddressCount" : 1
+            }
+        },
+        "panwFW1eni3": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 1 private (trust) interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet4"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW1eni3"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth3"
+                    }
+                ],
+                "SecondaryPrivateIpAddressCount" : 1
+            }
+        },
+        "panwFW2eni0": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 2 management interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW2eni0"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth0"
+                    }
+                ]
+            }
+        },
+        "panwFW2eni1": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 2 HA2 interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet2"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW2eni1"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth1"
+                    }
+                ]
+            }
+        },
+        "panwFW2eni2": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 2 public (untrust) interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet3"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW2eni2"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth2"
+                    }
+                ],
+                "SecondaryPrivateIpAddressCount" : 1
+            }
+        },
+        "panwFW2eni3": {
+            "Type": "AWS::EC2::NetworkInterface",
+            "Properties": {
+                "Description": "Firewall 2 private (trust) interface",
+                "GroupSet": [
+                    {
+                        "Ref": "PaloAltoFWSecGrp"
+                    }
+                ],
+                "SourceDestCheck": "false",
+                "SubnetId": {
+                    "Ref": "Subnet4"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::StackName"
+                                    },
+                                    "-panwFW2eni3"
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "Key": "Interface",
+                        "Value": "eth3"
+                    }
+                ],
+                "SecondaryPrivateIpAddressCount" : 1
+            }
+        },
+        "DataPlaneIntfEIP": {
+            "Type": "AWS::EC2::EIP",
+            "Condition": "AssociateEIPToDataPlaneIntf",
+            "Properties": {
+                "Domain": "vpc"
+            },
+            "DependsOn": "panwFW1"
+        },
+        "panwFW1MgmtIntfEIP": {
+            "Type": "AWS::EC2::EIP",
+            "Properties": {
+                "Domain": "vpc"
+            },
+            "DependsOn": "panwFW1"
+        },
+        "panwFW2MgmtIntfEIP": {
+            "Type": "AWS::EC2::EIP",
+            "Properties": {
+                "Domain": "vpc"
+            },
+            "DependsOn": "panwFW2"
+        },
+        "DataPlaneIntfEIPAssociation": {
+            "Type": "AWS::EC2::EIPAssociation",
+            "Condition": "AssociateEIPToDataPlaneIntf",
+            "Properties": {
+                "AllocationId": {
+                    "Fn::GetAtt": [
+                        "DataPlaneIntfEIP",
+                        "AllocationId"
+                    ]
+                },
+                "NetworkInterfaceId": {
+                    "Ref": "panwFW1eni2"
+                },
+                "PrivateIpAddress": {
+                    "Fn::Select" : [ "0", {"Fn::GetAtt" : [ "panwFW1eni2" , "SecondaryPrivateIpAddresses" ]}]
+                }
+            },
+            "DependsOn": "DataPlaneIntfEIP"
+        },
+        "panwFW1MgmtIntfEIPAssociation": {
+            "Type": "AWS::EC2::EIPAssociation",
+            "Properties": {
+                "AllocationId": {
+                    "Fn::GetAtt": [
+                        "panwFW1MgmtIntfEIP",
+                        "AllocationId"
+                    ]
+                },
+                "NetworkInterfaceId": {
+                    "Ref": "panwFW1eni0"
+                }
+            },
+            "DependsOn": "panwFW1MgmtIntfEIP"
+        },
+        "panwFW2MgmtEIPAssociation": {
+            "Type": "AWS::EC2::EIPAssociation",
+            "Properties": {
+                "AllocationId": {
+                    "Fn::GetAtt": [
+                        "panwFW2MgmtIntfEIP",
+                        "AllocationId"
+                    ]
+                },
+                "NetworkInterfaceId": {
+                    "Ref": "panwFW2eni0"
+                }
+            },
+            "DependsOn": "panwFW2MgmtIntfEIP"
+        },
+        "LambdaExecutionRole" : {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [ {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "lambda.amazonaws.com"
+                        },
+                        "Action": "sts:AssumeRole"
+                    } ]
+                },
+                "Path":"/",
+                "Policies": [ {
+                    "PolicyName": "LambdaExecutionRolePolicy",
+                    "PolicyDocument":{
+                        "Version": "2012-10-17",
+                        "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": "s3:ListBucket",
+                            "Resource": { "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref" : "LambdaS3Bucket" }, "/*" ] ] }
+                        },
+                        {  
+                            "Effect": "Allow",
+                            "Action": "s3:GetObject",
+                            "Resource": { "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref" : "LambdaS3Bucket" }, "/*" ] ] }
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": ["iam:UpdateAssumeRolePolicy","iam:GetRole","iam:PassRole", "iam:CreateServiceLinkedRole"],
+                            "Resource": ["*" ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "ec2:AttachNetworkInterface",
+                                "ec2:CreateNetworkInterface",
+                                "ec2:DeleteNetworkInterface",
+                                "ec2:DeleteSecurityGroup",
+                                "ec2:DescribeInstances",
+                                "ec2:DescribeNetworkInterfaces",
+                                "ec2:DetachNetworkInterface",
+                                "ec2:DeleteSecurityGroup",
+                                "ec2:DescribeSubnets",
+                                "ec2:DescribeVpcs",
+                                "ec2:DescribeSecurityGroups"
+                            ],
+                            "Resource": [
+                                "*"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "events:*"
+                            ],
+                            "Resource": [
+                                "*"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "cloudwatch:*"
+                            ],
+                            "Resource": [
+                                "*"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
+                            "Resource": "arn:aws:logs:*:*:*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutDestination",
+                                "logs:PutDestinationPolicy",
+                                "logs:PutLogEvents",
+                                "logs:PutMetricFilter"
+                            ],
+                            "Resource": [
+                                "*"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "lambda:AddPermission",
+                                "lambda:CreateEventSourceMapping",
+                                "lambda:CreateFunction",
+                                "lambda:DeleteEventSourceMapping",
+                                "lambda:DeleteFunction",
+                                "lambda:GetEventSourceMapping",
+                                "lambda:ListEventSourceMappings",
+                                "lambda:RemovePermission",
+                                "lambda:UpdateEventSourceMapping",
+                                "lambda:UpdateFunctionCode",
+                                "lambda:UpdateFunctionConfiguration",
+                                "lambda:GetFunction",
+                                "lambda:ListFunctions"
+                            ],
+                            "Resource": [
+                                "*"
+                            ]
+                        }
+                        ]
+                    }
+                }]
+            }
+        },
+        "InitLambda" : {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Handler": "init.lambda_handler",
+                "Role": { "Fn::GetAtt" : ["LambdaExecutionRole", "Arn"] },
+                "Code": {
+                    "S3Bucket": { "Ref" : "LambdaS3Bucket" },
+                    "S3Key": "panw-aws-ha.zip" 
+                },
+            "Runtime": "python2.7",
+            "Timeout": "300"
+            },
+            "DependsOn": [ "LambdaExecutionRole" ]
+        },
+        "LambdaCustomResource": {
+            "Type": "AWS::CloudFormation::CustomResource",
+            "Version" : "1.0",
+            "DependsOn": [ "InitLambda" ],
+            "Properties" : {
+                "ServiceToken": { "Fn::GetAtt" : ["InitLambda", "Arn"] },
+                "KeyPANWFirewall" : { "Ref" : "KeyPANWFirewall" },
+                "PANSecurityGroup" : {"Ref" : "LambdaSecurityGroup"},
+                "LambdaExecutionRole" : {"Ref" : "LambdaExecutionRole"},
+                "LambdaS3Bucket" : {"Ref" : "LambdaS3Bucket"},
+                "StackName" : { "Ref": "AWS::StackName" },
+                "VPCId" : { "Ref" : "VPC"},
+                "SubnetIDsLambda" : {
+                    "Fn::Join": [ 
+                        ",",
+                        [ 
+                            { "Ref" : "Subnet1" }, 
+                            { "Ref" : "LambdaSubnet1"}
+                        ] 
+                    ]
+                },
+                "MgmtSubnetId" : { "Ref" : "Subnet1"},
+                "HA2SubnetId" : { "Ref" : "Subnet2"},
+                "FW1MgmtIP": { "Fn::GetAtt" : [ "panwFW1eni0" , "PrimaryPrivateIpAddress" ]},
+                "FW2MgmtIP": { "Fn::GetAtt" : [ "panwFW2eni0" , "PrimaryPrivateIpAddress" ]},
+                "FW1HA2IP": { "Fn::GetAtt" : [ "panwFW1eni1" , "PrimaryPrivateIpAddress" ]},
+                "FW2HA2IP": { "Fn::GetAtt" : [ "panwFW2eni1" , "PrimaryPrivateIpAddress" ]}
+            }
+        }
+    },
+    "Outputs": {
+        "Username": {
+            "Value": "admin",
+            "Description": "Username for the VM-Series Firewalls"
+        },
+        "panwFW1LoginURL": {
+            "Value": {
+                "Fn::Join": [
+                    "",
+                    [
+                        "https://",
+                        {
+                            "Ref": "panwFW1MgmtIntfEIP"
+                        }
+                    ]
+                ]
+            },
+            "Description": "Login URL for the Mgmt interface of Firewall 1"
+        },
+        "panwFW2LoginURL": {
+            "Value": {
+                "Fn::Join": [
+                    "",
+                    [
+                        "https://",
+                        {
+                            "Ref": "panwFW2MgmtIntfEIP"
+                        }
+                    ]
+                ]
+            },
+            "Description": "Login URL for the Mgmt interface of Firewall 2"
+        },
+        "BootstrapS3BucketActive": {
+            "Value": { "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref" : "BootstrapS3BucketActive" } ] ] },
+            "Description": "Your Bootstrap bucket being used for the active firewall deployment"
+        },
+        "BootstrapS3BucketPassive": {
+            "Value": { "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref" : "BootstrapS3BucketPassive" } ] ] },
+            "Description": "Your Bootstrap bucket being used for the passive firewall deployment"
+        },
+        "KeyName": {
+            "Value": { "Ref": "KeyName" },
+            "Description": "Key Pair you have selected for SSH"
+        },
+        "FW1MgmtIP": {
+            "Value" : {
+                "Fn::GetAtt" : [ "panwFW1eni0" , "PrimaryPrivateIpAddress" ]
+            }
+        },
+        "FW2MgmtIP": {
+            "Value" : {
+                "Fn::GetAtt" : [ "panwFW2eni0" , "PrimaryPrivateIpAddress" ]
+            }
+        },
+        "FW1HA2IP": {
+            "Value" : {
+                "Fn::GetAtt" : [ "panwFW1eni1" , "PrimaryPrivateIpAddress" ]
+            }
+        },
+        "FW2HA2IP": {
+            "Value" : {
+                "Fn::GetAtt" : [ "panwFW2eni1" , "PrimaryPrivateIpAddress" ]
+            }
+        },
+        "ManagementSubnet" : { 
+            "Value" : {"Ref" : "Subnet1"}
+        },
+        "HA2Subnet" : { 
+            "Value" : {"Ref" : "Subnet2"}
+        },
+        "PublicSubnet" : { 
+            "Value" : {"Ref" : "Subnet3"}
+        },
+        "PrivateSubnet" : { 
+            "Value" : {"Ref" : "Subnet4"}
+        },
+        "panwFW1DataplaneIntfandEIP": {
+            "Value": { 
+                "Fn::Join": [ 
+                    "", 
+                    [ 
+                        "SecondaryIP: ", 
+                        {"Fn::Select" : [ "0", {"Fn::GetAtt" : [ "panwFW1eni2" , "SecondaryPrivateIpAddresses" ]}]}, 
+                        "EIP: ",
+                        {"Fn::If": ["AssociateEIPToDataPlaneIntf", {"Fn::GetAtt" : [ "DataPlaneIntfEIP" , "AllocationId" ]}, {"Ref" : "AWS::NoValue"}]}
+                    ]
+                ]
+            }
+        }
+    }
+}
